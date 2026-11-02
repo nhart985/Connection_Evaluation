@@ -90,14 +90,15 @@ for(i in 1:n_sim) {
   coverage_sim[i]=as.numeric(sim_flagging$lower < exp(psi_size) & sim_flagging$upper > exp(psi_size))
   
   #Empirical Null Flagging
-  EN_est=empirical_null_ind_RQ(S, E_ij_EN)
+  a_id=df$center_pat[match(names(O_ij),df$combo_pat)]
+  g_id=df$OPO_pat[match(names(O_ij),df$combo_pat)]
+  EN_est=empirical_null_ind_RQ_corr(S, E_ij_EN, a_id, g_id)
   gt_90 <- function(x){ifelse(x<ceiling(quantile(x,0.9)), x, ceiling(quantile(x,0.9)))}
   S_EN=S/sqrt(1+(EN_est$phi^2)*gt_90(E_ij_EN))
   flag_EN[i]=as.numeric(S_EN[1] > 1.96 | S_EN[1] < -1.96) 
   lower_EN=O_ij/E_ij_EN-1.96*sqrt((1+(EN_est$phi^2)*gt_90(E_ij_EN))/E_ij_EN)
   upper_EN=O_ij/E_ij_EN+1.96*sqrt((1+(EN_est$phi^2)*gt_90(E_ij_EN))/E_ij_EN)
   coverage_EN[i]=as.numeric(lower_EN[1] < exp(psi_size) & upper_EN[1] > exp(psi_size))
-  
 }
 
 #If psi_size=0, the simulation and empirical null methods should be close to 5% 
