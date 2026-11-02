@@ -1,6 +1,8 @@
 library(cobs)
 library(MASS)   # for rlm()
 library(fmsb)
+library(mvtnorm)
+library(condMVNorm)
 
 #─── Overall empirical‐null ────────────────────────────────────────────────────
 # Calculate the negative log-likelihood assuming the Z-scores follow a homogeneous empirical null distribution
@@ -653,6 +655,119 @@ estimate_pois <- function(Z, Xbar, E, E2,
                     "sigmaAlpha2", "sigmaEps2")
   best <- df[ which.min(df[,"negloglik"]), ]
   as.list(best)
+}
+
+
+negloglik_indiv_fast <- function(phi, z, n_tilde, trunc_lower, trunc_upper, p0) {
+  
+  in_trunc <- (z >= trunc_lower & z <= trunc_upper)
+  z0       <- z[in_trunc]; n0 <- n_tilde[in_trunc]
+  z1       <- z[!in_trunc]; n1 <- n_tilde[!in_trunc]
+  N0       <- length(z0)
+
+  # variance‐vectors
+  var0 <- 1 + n0 * phi
+  var1 <- 1 + n1 * phi
+  
+  # truncated‐probabilities (vector if bounds vary; scalar otherwise)
+  Q    <- pnorm(trunc_upper[!in_trunc] / sqrt(var1)) - pnorm(trunc_lower[!in_trunc] / sqrt(var1))
+  
+  ll0  <- - sum(
+    log(var0)/2 +
+      (z0^2) / (2 * var0)
+  )
+  ll1  <-  N0*log(p0) + sum(log(1 - p0 * Q))
+  
+  -(ll0 + ll1)
+}
+
+empirical_null_ind_RQ_corr <- function(z, n, a_id, g_id, p_grid=seq(0.8,0.999,0.005),
+                                  est_method = "optim", # may change here to specific methods in optim
+                                  cutoff=0.95, sigma_est, range) {
+  N <- length(z)
+  c_val <- qnorm((1-cutoff)/2, lower.tail=F)
+  
+  if(missing(sigma_est) & missing(range)) {
+    rlm_est <- rlm(z~1)
+    range=(rlm_est$s^2-1)/median(n)
+    xlim <- c_val*sqrt(1+n*range)
+  } else if(!missing(sigma_est) & missing(range)) {
+    xlim <- c_val*sigma_est
+  } else{
+    xlim <- c_val*sqrt(n*range)
+  }
+  
+  trunc_lower <- -xlim
+  trunc_upper <- xlim
+  
+  parms_out=matrix(NA,10,3)
+  neg_log_L=vector("numeric")
+  for(i in 1:10) {
+    fit=optim(par=c(0,0,0),fn=negloglik_indiv_fast_corr_optim, lower=c(0,0,0), upper=c(0.1,0.1,0.1), method="L-BFGS-B",z=z, n=n, a_id=a_id, g_id=g_id, trunc_lower=trunc_lower, trunc_upper=trunc_upper, p0=1/i)
+    parms_out[i,]=fit$par
+    neg_log_L[i]=fit$value
+  }
+  
+  parms_selected=parms_out[which.min(neg_log_L),]
+  return(list(vars=parms_selected,phi=sqrt(sum(parms_selected))))
+}
+
+negloglik_indiv_fast_corr_optim <- function(par, z, n, a_id, g_id, trunc_lower, trunc_upper, p0) {
+  return(negloglik_indiv_fast_corr(par[1],par[2],par[3], z, n, a_id, g_id, trunc_lower, trunc_upper, p0))
+}
+
+negloglik_indiv_fast_corr <- function(s2a, s2g, s2u, z, n_tilde, a_id, g_id, trunc_lower, trunc_upper, p0) {
+  
+  in_trunc <- (z >= trunc_lower & z <= trunc_upper)
+  z0 <- z[in_trunc]; n0 <- n_tilde[in_trunc]
+  z1 <- z[!in_trunc]; n1 <- n_tilde[!in_trunc]
+  N <- length(z)
+  N0 <- length(z0)
+  N1 <- N-N0
+  a_id0 <- a_id[in_trunc]
+  g_id0 <- g_id[in_trunc]
+  a_id1 <- a_id[!in_trunc]
+  g_id1 <- g_id[!in_trunc]
+
+  get_indices <- function(id) {
+    dups <- (duplicated(id) | duplicated(id,fromLast=T))
+    ind_split <- split(which(dups), id[dups])
+    f <- function(x) {
+      return(t(combn(x,m=2)))
+    }
+    ind_pairs <- do.call(rbind,lapply(ind_split,f))
+    ind_pairs <- rbind(ind_pairs,ind_pairs[,c(2,1)])
+  }
+  
+  # variance‐vectors
+  var0 <- 1 + n0*(s2a+s2g+s2u)
+  var1 <- 1 + n1*(s2a+s2g+s2u)
+  sigma0 <- diag(var0)
+  sigma1 <- diag(var1)
+  a_ind0 <- get_indices(a_id0)
+  g_ind0 <- get_indices(g_id0)
+  sigma0[a_ind0] <- s2a*sqrt(n0[a_ind0[,1]]*n0[a_ind0[,2]])
+  sigma0[g_ind0] <- s2g*sqrt(n0[g_ind0[,1]]*n0[g_ind0[,2]])
+  a_ind1 <- get_indices(a_id1)
+  g_ind1 <- get_indices(g_id1)
+  sigma1[a_ind1] <- s2a*sqrt(n1[a_ind1[,1]]*n1[a_ind1[,2]])
+  sigma1[g_ind1] <- s2g*sqrt(n1[g_ind1[,1]]*n1[g_ind1[,2]])
+
+  mu <- rep(0,length(z1))
+  Q_first  <- pnorm(trunc_upper[!in_trunc][1]/sqrt(var1[1])) - pnorm(trunc_lower[!in_trunc][1]/sqrt(var1[1]))
+  ll1 <- log(1-p0*Q_first)
+  for(i in 2:N1) {
+    cond_pars <- condMVN(mean=mu,sigma=sigma1,dependent.ind=i,given.ind=1:(i-1),X.given=z1[1:(i-1)])
+    Q_i  <- pnorm(trunc_upper[!in_trunc][i],cond_pars$condMean,sqrt(cond_pars$condVar))-pnorm(trunc_lower[!in_trunc][i],cond_pars$condMean,sqrt(cond_pars$condVar))
+    ll1 <- ll1+log(1-p0*Q_i)
+  }
+  ll0  <- N0*log(p0)+dmvnorm(z0,mean=rep(0,length(z0)),sigma=sigma0,log=T)
+  
+  out <- -(ll0 + ll1)
+  if(is.infinite(out) & out > 0) {
+    out <- .Machine$double.xmax
+  }
+  return(out)
 }
 
 
